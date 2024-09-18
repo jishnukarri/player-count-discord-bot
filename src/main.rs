@@ -1,23 +1,20 @@
-use std::collections::HashMap;
-use std::{fs, process};
-use std::io::{self, Write, stdout};
-use std::panic::{self, PanicInfo};
-use std::process::{Stdio, Command};
-use std::env;
+use serenity::all::{ActivityData, Context, EventHandler, GatewayIntents, Interaction, InteractionResponseFlags, Command};
+use serenity::async_trait;
+use serenity::prelude::TypeMapKey;
+use serenity::utils::token::validate;
+use serenity::Client;
 
 use a2s::{self, A2SClient};
 
 use serde::{Deserialize, Serialize};
 
-use serenity::all::{ActivityData, Context, EventHandler, GatewayIntents, Ready};
-use serenity::async_trait;
-use serenity::model::prelude::command::CommandOptionType;
-use serenity::model::prelude::{CommandInteraction, InteractionResponseType};
-use serenity::prelude::TypeMapKey;
-use serenity::utils::token::validate;
-use serenity::Client;
-
-use toml::{Table, Value};
+use std::collections::HashMap;
+use std::default::Default;
+use std::fs;
+use std::io::{self, Write};
+use std::panic::{self, PanicInfo};
+use std::process::{Stdio, Command};
+use std::env;
 
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
@@ -29,9 +26,8 @@ use crossterm::style::{Colors, Color, SetColors};
 use crossterm::ExecutableCommand;
 use crossterm::terminal::{SetSize, SetTitle};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
-#[derive(Clone)]
 struct Server {
     enable: bool,
     address: String,
@@ -48,7 +44,7 @@ impl Default for Server {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ConfigLayout {
     #[serde(with = "humantime_serde")]
     refreshInterval: Duration,
@@ -72,80 +68,44 @@ struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-
-        // Register a slash command for player info
-        let _ = serenity::model::prelude::command::Command::create_global_application_command(&ctx.http, |command| {
-            command.name("playerlist").description("Get detailed player info")
-        })
-        .await;
-
         tokio::spawn(server_activity(ctx));
     }
 
-    // Handle the interaction for the `/playerlist` command
-    async fn interaction_create(&self, ctx: Context, interaction: serenity::model::prelude::CommandInteraction) {
-        if interaction.data.name == "playerlist" {
-            let guard = ctx.data.read().await;
-            let addr = guard.get::<TMAddress>().unwrap();
-            let a2s = A2SClient::new().await.unwrap();
-
-            // Fetch player info
-            match a2s.players(addr).await {
-                Ok(players) => {
-                    let mut player_info = String::from("```\n Player   |   Score | Time\n----------+---------+------------\n");
-
-                    for player in players {
-                        let time_played = format!("{}h {}m {}s", player.duration.as_secs() / 3600, (player.duration.as_secs() % 3600) / 60, player.duration.as_secs() % 60);
-                        player_info.push_str(&format!("{:<9} | {:>7} | {}\n", player.name, player.score, time_played));
-                    }
-
-                    player_info.push_str("```");
-
-                    // Respond with the detailed player table
-                    let _ = interaction.create_interaction_response(&ctx.http, |response| {
-                        response
-                            .kind(InteractionResponseType::ChannelMessageWithSource)
-                            .interaction_response_data(|message| message.content(player_info))
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::ApplicationCommand(command) = interaction {
+            let player_list = vec![]; // Replace with actual player list
+            let response = format!("Player List: {:?}", player_list);
+            let _ = command.create_response(&ctx.http, |response| {
+                response
+                    .kind(InteractionResponseFlags::CHANNEL_MESSAGE_WITH_SOURCE)
+                    .interaction_response_data(|message| {
+                        message.content(response)
                     })
-                    .await;
-                }
-                Err(_) => {
-                    let _ = interaction.create_interaction_response(&ctx.http, |response| {
-                        response
-                            .kind(InteractionResponseType::ChannelMessageWithSource)
-                            .interaction_response_data(|message| message.content("Failed to get player information."))
-                    })
-                    .await;
-                }
-            }
+            }).await;
         }
     }
 }
 
-// Changes bot's activity to show player count and map
-async fn server_activity(ctx: Context) -> () {
+async fn server_activity(ctx: Context) {
     loop {
         let guard = ctx.data.read().await;
         let addr = guard.get::<TMAddress>().unwrap();
         let refresh_interval = guard.get::<TMRefreshInterval>().unwrap();
         let a2s = A2SClient::new().await.unwrap();
         let status: String;
-
         match a2s.info(addr).await {
             Ok(info) => {
-                status = format!("Playing {}/{} on map: {}", info.players, info.max_players, info.map);
+                status = format!("Playing {}/{}", info.players, info.max_players);
             }
             Err(_) => {
-                status = "Server Offline".into();
+                status = "Offline".into();
             }
         }
-
         ctx.set_activity(Some(ActivityData::custom(status)));
         sleep(refresh_interval.clone()).await;
     }
 }
 
-// Insert data into the context of the event handler
 struct TMAddress;
 impl TypeMapKey for TMAddress {
     type Value = String;
@@ -164,13 +124,9 @@ pub enum Error {
 
 async fn watch_server(name: String, server: Server, refresh_interval: Duration) -> anyhow::Result<()> {
     validate(&server.apiKey).map_err(|_| Error::InvalidToken(server.apiKey.clone()))?;
-    let mut client = Client::builder(&server.apiKey, GatewayIntents::default())
-        .event_handler(Handler)
-        .await?;
-
+    let mut client = Client::builder(&server.apiKey, GatewayIntents::default()).event_handler(Handler).await?;
     client.data.write().await.insert::<TMAddress>(server.address);
     client.data.write().await.insert::<TMRefreshInterval>(refresh_interval);
-
     loop {
         match client.start().await {
             Ok(_) => {}
@@ -181,24 +137,23 @@ async fn watch_server(name: String, server: Server, refresh_interval: Duration) 
     }
 }
 
-fn quit() -> () {
+fn quit() {
     println!("Press Enter to exit...");
     io::stdout().flush().expect("Failed to flush stdout");
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
+    io::stdin().read_line(&mut input).expect("Failed to read line");
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> () {
-    #[cfg(target_os = "windows")] {
+async fn main() {
+    #[cfg(target_os = "windows")]
+    {
         let args: Vec<String> = env::args().collect();
         if !args.iter().any(|i| i == "-b") {
             Command::new("conhost")
                 .args(["cmd.exe", "/K", "mode con cols=50 lines=10 && player-count-discord-bot.exe -b && exit"])
                 .spawn()
-                .expect("failed to bootstrap onto conhost.");
+                .expect("failed to boostrap onto conhost.");
             return;
         }
     }
@@ -207,63 +162,40 @@ async fn main() -> () {
         println!("{}", msg);
         quit();
     }));
-
     stdout().execute(SetTitle("Player Count Bots")).unwrap();
     stdout().execute(SetColors(Colors::new(Color::DarkGreen, Color::Black))).unwrap();
     stdout().execute(SetSize(50, 100)).unwrap();
 
     let config_path = "./config.toml".to_string();
-
-    // Create config file if doesn't exist
     if fs::metadata(&config_path).is_err() {
-        fs::File::create_new(&config_path).unwrap();
+        fs::File::create(&config_path).unwrap();
     }
-    let toml = fs::read_to_string("./config.toml").unwrap();
-
-    let config_doc: Table = toml::from_str(&toml).expect("config file doesn't contain valid TOML");
+    let toml = fs::read_to_string(&config_path).unwrap();
+    let config_doc: toml::Table = toml::from_str(&toml).expect("config file doesn't contain valid TOML");
 
     let mut config = ConfigLayout::default();
-
-    if config_doc.len() == 0 {
+    if config_doc.is_empty() {
         fs::write(&config_path, toml::to_string(&config).unwrap().as_str()).unwrap();
     } else {
         config.servers.drain();
         for (name, value) in config_doc {
             if name == "refreshInterval" {
-                if let Value::String(v) = &value {
+                if let toml::Value::String(v) = &value {
                     config.refreshInterval = v.parse::<humantime::Duration>().unwrap().into();
                 }
-            } else if let Value::Table(v) = &value {
+            } else if let toml::Value::Table(v) = &value {
                 let s = value.try_into::<Server>().unwrap();
                 config.servers.insert(name, s);
             }
         }
     }
 
-    let mut tasks = JoinSet::new();
-    for (name, server) in &config.servers {
-        if server.enable {
-            tasks.spawn(watch_server(name.clone(), server.clone(), config.refreshInterval.clone()));
-        }
+    let mut set = JoinSet::new();
+    for (name, server) in config.servers.iter() {
+        set.spawn(watch_server(name.clone(), server.clone(), config.refreshInterval));
     }
-
-    while !tasks.is_empty() {
-        select! {
-            _ = signal::ctrl_c() => {
-                tasks.abort_all();
-            },
-            Some(r) = tasks.join_next() => {
-                match r {
-                    Ok(r) => {
-                        if let Err(e) = r {
-                            println!("task error: {}", e);
-                        }
-                    }
-                    Err(_) => {
-                    }
-                }
-            }
-        };
+    select! {
+        _ = signal::ctrl_c() => println!("Ctrl+C received, stopping..."),
+        _ = set.join_next() => {},
     }
-    quit();
 }

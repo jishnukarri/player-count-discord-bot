@@ -1,22 +1,39 @@
-name: Rust
+name: Build Rust Executable
 
 on:
   push:
-    branches: [ "master" ]
+    branches:
+      - master
   pull_request:
-    branches: [ "master" ]
-
-env:
-  CARGO_TERM_COLOR: always
+    branches:
+      - master
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Check out the repository
+      uses: actions/checkout@v3
+      with:
+        submodules: recursive # This fetches the submodules
+
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: x86_64-pc-windows-gnu  # Target Windows build
+        profile: minimal
+        override: true
+
+    - name: Install build dependencies
+      run: sudo apt-get install -y mingw-w64
+
+    - name: Build the project
+      run: cargo build --release --target x86_64-pc-windows-gnu --verbose
+
+    - name: Upload the executable
+      uses: actions/upload-artifact@v3
+      with:
+        name: player-count-discord-bot
+        path: target/x86_64-pc-windows-gnu/release/player-count-discord-bot.exe
